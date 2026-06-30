@@ -148,26 +148,20 @@ class BaseRPC(ABC):
         return self._send_request(request)
 
     def noraise_raw_request(
-        self, payload: Dict[str, Any], content_type: str = "application/json"
+        self,
+        data: Any,
+        content_type: str = "application/json",
     ) -> Dict[str, Any]:
         """
-        Send an arbitrary dict as a JSON-RPC request body and return the raw
+        Send raw data or a dict as a JSON-RPC request body and return the raw
         parsed response WITHOUT raising.
         """
         request_kwargs = self._build_request_kwargs()
         request_kwargs["headers"]["content-type"] = content_type
-        request_kwargs["data"] = json.dumps(payload)
-        return self._send_request(request_kwargs)
 
-    def noraise_raw_data_request(
-        self, data, content_type: str = "application/json"
-    ) -> Dict[str, Any]:
-        """
-        Send raw data (string/bytes) to the RPC endpoint and return the raw
-        parsed response WITHOUT raising.
-        """
-        request_kwargs = self._build_request_kwargs()
-        request_kwargs["headers"]["content-type"] = content_type
+        if isinstance(data, dict):
+            data = json.dumps(data)
+
         request_kwargs["data"] = data
         return self._send_request(request_kwargs)
 
@@ -194,6 +188,9 @@ class BaseRPC(ABC):
         resp = self.noraise_request(method, params)
 
         if resp["status_code"] != 200:
+            self.log.error(
+                f"RPC request failed with status code {resp['status_code']}: {resp['body']}"
+            )
             raise HTTPError
 
         result = resp["body"]
@@ -416,52 +413,91 @@ class BaseRPC(ABC):
         """
         return self.perform_request("getaddrmaninfo")
 
+    def get_raw_transaction(self, txid: str, verbose: int | None = None):
+        """
+        Returns the raw transaction data for a given transaction ID.
+        """
+        params = [txid]
+        if verbose is not None:
+            params.append(int(verbose))
 
-def make_raw_request(node, payload, content_type="application/json"):
-    """
-    Send a raw JSON-RPC request and return the parsed response without raising on non-200.
-    """
-    return node.rpc.noraise_raw_request(payload, content_type)
+        return self.perform_request("getrawtransaction", params=params)
 
+    def ensure_rpc_raw_request_call_success(
+        self, payload, content_type="application/json"
+    ):
+        """Assert that a raw JSON-RPC request indicates success (HTTP 200, no error)."""
+        resp = self.noraise_raw_request(payload, content_type)
+        self.assert_rpc_success(resp)
 
-def make_raw_data_request(node, data, content_type="application/json"):
-    """
-    Send raw data to the JSON-RPC endpoint and return the parsed response.
+        return resp
 
-    Unlike ``make_raw_request`` this accepts a raw string/bytes body instead of
-    a dict, allowing tests to send malformed or non-JSON payloads.
-    """
-    return node.rpc.noraise_raw_data_request(data, content_type)
+    def ensure_rpc_call_success(self, method, params=None, request_id="test"):
+        """Assert that a JSON-RPC response indicates success (HTTP 200, no error)."""
+        resp = self.noraise_request(method, params, request_id)
+        self.assert_rpc_success(resp)
 
+        return resp
 
-def make_request(node, method, params=None, request_id="test"):
-    """
-    Send a JSON-RPC request and return the parsed response without raising on non-200.
-    """
-    return node.rpc.noraise_request(method, params, request_id)
+    def assert_rpc_success(self, resp):
+        """Assert that a JSON-RPC response indicates success (HTTP 200, no error)."""
+        assert resp["status_code"] == 200
+        assert resp["body"].get("error") is None
 
+    # pylint: disable=too-many-arguments, too-many-positional-arguments
+    def ensure_rpc_raw_request_call_error(
+        self,
+        payload,
+        expected_status_code=None,
+        expected_rpcerror_code=None,
+        expected_message=None,
+        content_type="application/json",
+    ):
+        """Assert that a raw JSON-RPC request indicates an error (non-200, error present)."""
+        resp = self.noraise_raw_request(payload, content_type)
+        self.assert_rpc_error(
+            resp, expected_status_code, expected_rpcerror_code, expected_message
+        )
 
-def assert_rpc_success(resp):
-    """Assert that a JSON-RPC response indicates success (HTTP 200, no error)."""
-    assert resp["status_code"] == 200
-    assert resp["body"].get("error") is None
+        return resp
 
+    # pylint: disable=too-many-arguments, too-many-positional-arguments
+    def ensure_rpc_call_error(
+        self,
+        method,
+        params=None,
+        request_id="test",
+        expected_status_code=None,
+        expected_rpcerror_code=None,
+        expected_message=None,
+    ):
+        """Assert that a JSON-RPC response indicates an error (non-200, error present)."""
+        resp = self.noraise_request(method, params, request_id)
+        self.assert_rpc_error(
+            resp, expected_status_code, expected_rpcerror_code, expected_message
+        )
 
-def assert_rpc_error(
-    resp, expected_status_code=None, expected_rpcerror_code=None, expected_message=None
-):
-    """
-    Assert that a JSON-RPC response indicates an error (non-200, error present).
-    """
-    assert resp["body"].get("error") is not None
+        return resp
 
-    if expected_status_code is None:
-        assert resp["status_code"] != 200
-    else:
-        assert resp["status_code"] == expected_status_code
+    def assert_rpc_error(
+        self,
+        resp,
+        expected_status_code=None,
+        expected_rpcerror_code=None,
+        expected_message=None,
+    ):
+        """
+        Assert that a JSON-RPC response indicates an error (non-200, error present).
+        """
+        assert resp["body"].get("error") is not None
 
-    if expected_rpcerror_code is not None:
-        assert resp["body"]["error"]["code"] == expected_rpcerror_code
+        if expected_status_code is None:
+            assert resp["status_code"] != 200
+        else:
+            assert resp["status_code"] == expected_status_code
 
-    if expected_message is not None:
-        assert resp["body"]["error"]["message"] == expected_message
+        if expected_rpcerror_code is not None:
+            assert resp["body"]["error"]["code"] == expected_rpcerror_code
+
+        if expected_message is not None:
+            assert resp["body"]["error"]["message"] == expected_message
